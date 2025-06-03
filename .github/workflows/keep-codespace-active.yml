@@ -1,24 +1,5 @@
 name: Keep Codespace Active
-on:
-  workflow_dispatch: # Manual trigger to start
-  repository_dispatch:
-    types: [keep-codespace-active] # Self-trigger
-jobs:
-  check-and-activate:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Log Workflow Trigger Time
-        run: |
-          echo "Workflow triggered at $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-      - name: Install GitHub CLI
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gh jq
-          echo "GitHub CLI version:"
-          gh --version
-      - name: Authenticate GitHub CLI
-        run: |
-          echo "${{ secrets.CODESPACE_PAT }}" | gh auth login --with-token
+
           gh auth status
       - name: Check API Rate Limit
         run: |
