@@ -28,17 +28,6 @@ jobs:
             echo "Rate limit too low. Waiting 300 seconds..."
             sleep 300
           fi
-      - name: Check for Running Workflows
-        run: |
-          echo "Checking for running workflows at $(date -u '+%Y-%m-%d %H:%M:%S UTC')..."
-          RUNNING_WORKFLOWS=$(gh api /repos/${{ github.repository }}/actions/runs \
-            --jq '[.workflow_runs[] | select(.name == "Restart Codespace" or .name == "Retry Restart Codespace") | select(.status != "completed")] | length')
-          if [ "$RUNNING_WORKFLOWS" -gt 0 ]; then
-            echo "Found $RUNNING_WORKFLOWS running instances of 'Restart Codespace' or 'Retry Restart Codespace'. Skipping trigger."
-            exit 0
-          else
-            echo "No relevant workflows running. Proceeding with Codespace state check."
-          fi
       - name: Check Codespace State and Running Time
         env:
           CODESPACE_NAME: studious-spork-975v75jqj7vp397x
@@ -56,7 +45,7 @@ jobs:
           echo "Codespace state: $CODESPACE_STATE"
           echo "Last used at: $LAST_USED_AT"
 
-          # Calculate running time if state is Available
+          # Handle Available state
           if [ "$CODESPACE_STATE" = "Available" ]; then
             CURRENT_TIME=$(date -u +%s)
             LAST_USED_EPOCH=$(date -d "$LAST_USED_AT" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$LAST_USED_AT" +%s)
@@ -64,9 +53,11 @@ jobs:
             RUNNING_MINUTES=$((RUNNING_SECONDS / 60))
             echo "Codespace running for $RUNNING_MINUTES minutes"
             
-            if [ $RUNNING_MINUTES -ge 45 ]; then
-              echo "Codespace running ≥45 minutes. Stopping it before restarting..."
-              TRIGGER_RESTART="true"
+            if [ $RUNNING_MINUTES -le 5 ]; then
+              echo "Codespace running for ≤45 minutes. Skipping to sleep."
+              echo "SKIP_TO_SLEEP=true" >> $GITHUB_ENV
+            else
+              echo "Codespace running for >45 minutes. Stopping and restarting..."
               # Stop the Codespace
               STOP_RETRIES=3
               STOP_ATTEMPT=1
@@ -109,6 +100,7 @@ jobs:
                 echo "Codespace state: $CODESPACE_STATE"
                 if [ "$CODESPACE_STATE" = "Stopped" ] || [ "$CODESPACE_STATE" = "Shutdown" ]; then
                   echo "Codespace successfully stopped. Preparing to trigger restart..."
+                  TRIGGER_RESTART="true"
                   break
                 fi
                 echo "Waiting $POLL_INTERVAL seconds for Codespace to stop..."
@@ -119,20 +111,26 @@ jobs:
                 echo "Error: Timeout after $TIMEOUT_SECONDS seconds. Codespace state: $CODESPACE_STATE"
                 exit 1
               fi
-            else
-              echo "Codespace running for <$RUNNING_MINUTES minutes (<45). No action needed."
-              TRIGGER_RESTART="false"
             fi
           else
-            echo "Codespace is not Available (state: $CODESPACE_STATE). Preparing to trigger restart..."
-            TRIGGER_RESTART="true"
+            echo "Codespace is not Available (state: $CODESPACE_STATE). Checking for running workflows..."
+            # Check for running restart workflows
+            RUNNING_WORKFLOWS=$(gh api /repos/${{ github.repository }}/actions/runs \
+              --jq '[.workflow_runs[] | select(.name == "Restart Codespace" or .name == "Retry Restart Codespace") | select(.status != "completed")] | length')
+            if [ "$RUNNING_WORKFLOWS" -gt 0 ]; then
+              echo "Found $RUNNING_WORKFLOWS running instances of 'Restart Codespace' or 'Retry Restart Codespace'. Skipping to sleep."
+              echo "SKIP_TO_SLEEP=true" >> $GITHUB_ENV
+            else
+              echo "No relevant workflows running. Preparing to trigger restart..."
+              TRIGGER_RESTART="true"
+            fi
           fi
 
           if [ "$TRIGGER_RESTART" = "true" ]; then
             echo "Writing dispatch payload to trigger restart-codespace workflow..."
             echo "{\"event_type\": \"restart-codespace\", \"client_payload\": {\"codespace_name\": \"$CODESPACE_NAME\"}}" > dispatch_payload.json
 
-            DISPATCH_RETRIES=10
+            DISPATCH_RETRIES=3
             DISPATCH_ATTEMPT=1
             until [ $DISPATCH_ATTEMPT -gt $DISPATCH_RETRIES ]; do
               echo "Dispatch attempt $DISPATCH_ATTEMPT of $DISPATCH_RETRIES at $(date -u '+%Y-%m-%d %H:%M:%S UTC')..."
@@ -159,27 +157,15 @@ jobs:
               echo "Error: Failed to trigger restart-codespace workflow after $DISPATCH_RETRIES attempts."
               exit 1
             fi
-
-            echo "Final check of Codespace $CODESPACE_NAME state..."
-            CODESPACE_DETAILS=$(gh api /user/codespaces/$CODESPACE_NAME --jq '{state: .state, web_url: .web_url}' 2>&1)
-            CODESPACE_STATUS=$?
-            if [ $CODESPACE_STATUS -ne 0 ]; then
-              echo "Error fetching final Codespace details: $CODESPACE_DETAILS"
-              exit 1
-            fi
-            CODESPACE_STATE=$(echo "$CODESPACE_DETAILS" | jq -r '.state')
-            CODESPACE_WEB_URL=$(echo "$CODESPACE_DETAILS" | jq -r '.web_url')
-            echo "Codespace state: $CODESPACE_STATE"
-            if [ "$CODESPACE_STATE" = "Available" ]; then
-              echo "Codespace is now Available. Access at: $CODESPACE_WEB_URL"
-            else
-              echo "Codespace state after restart trigger: $CODESPACE_STATE"
-            fi
           fi
       - name: Schedule Next Run
+        if: always() # Run even if previous steps fail or skip
         run: |
           echo "Scheduling next run at $(date -u '+%Y-%m-%d %H:%M:%S UTC')..."
           # Sleep for 40 minutes (2400 seconds)
+          if [ "${{ env.SKIP_TO_SLEEP }}" = "true" ]; then
+            echo "Skipping directly to sleep due to Codespace state or running workflows."
+          fi
           sleep 100
           
           # Check API rate limit before dispatching
@@ -192,7 +178,7 @@ jobs:
           
           # Dispatch self-trigger
           echo '{"event_type": "keep-codespace-active"}' > self_dispatch.json
-          RETRIES=10
+          RETRIES=3
           ATTEMPT=1
           until [ $ATTEMPT -gt $RETRIES ]; do
             echo "Self-dispatch attempt $ATTEMPT of $RETRIES..."
