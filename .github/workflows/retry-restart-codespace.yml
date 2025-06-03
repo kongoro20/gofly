@@ -1,0 +1,50 @@
+name: Retry Restart Codespace
+on:
+  repository_dispatch:
+    types: [retry-restart-codespace]
+jobs:
+  retry:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install GitHub CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gh jq
+          echo "GitHub CLI version:"
+          gh --version
+      - name: Authenticate GitHub CLI
+        run: |
+          echo "${{ secrets.CODESPACE_PAT }}" | gh auth login --with-token
+          gh auth status
+      - name: Check Codespace State and Retry
+        env:
+          CODESPACE_NAME: ${{ github.event.client_payload.codespace_name }}
+        run: |
+          echo "Checking Codespace $CODESPACE_NAME state..."
+          CODESPACE_DETAILS=$(gh api /user/codespaces/$CODESPACE_NAME --jq '{state: .state, web_url: .web_url}' 2>&1)
+          CODESPACE_STATUS=$?
+          if [ $CODESPACE_STATUS -ne 0 ]; then
+            echo "Error fetching Codespace details: $CODESPACE_DETAILS"
+            exit 1
+          fi
+          CODESPACE_STATE=$(echo "$CODESPACE_DETAILS" | jq -r '.state')
+          CODESPACE_WEB_URL=$(echo "$CODESPACE_DETAILS" | jq -r '.web_url')
+          echo "Codespace state: $CODESPACE_STATE"
+          if [ "$CODESPACE_STATE" = "Available" ]; then
+            echo "Codespace $CODESPACE_NAME is already Available."
+            echo "Open the Codespace in VS Code at: $CODESPACE_WEB_URL"
+            echo "Then, check the Ports tab for the public URL of port 6200 (labeled 'VNC') to access the desktop GUI."
+            echo "Verify the container setup by checking for mohamed.txt on the desktop in the VNC GUI."
+            exit 0
+          else
+            echo "Codespace $CODESPACE_NAME is not Available (state: $CODESPACE_STATE). Triggering restart..."
+            sleep 60  # Delay to avoid rate limits
+            gh api -X POST \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "Authorization: token ${{ secrets.CODESPACE_PAT }}" \
+              /repos/${{ github.repository }}/dispatches \
+              -f event_type=restart-codespace \
+              -f client_payload="{\"codespace_name\": \"$CODESPACE_NAME\"}"
+            echo "Triggered restart-codespace workflow. Check the Actions tab for progress."
+            exit 0  # Exit successfully to allow the triggered workflow to run
+          fi
