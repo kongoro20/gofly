@@ -16,86 +16,127 @@ jobs:
         run: |
           echo "${{ secrets.CODESPACE_PAT }}" | gh auth login --with-token
           gh auth status
-      - name: Wait for Codespace to Stop
+      - name: Attempt to Restart Codespace
         env:
           CODESPACE_NAME: ${{ github.event.client_payload.codespace_name }}
         run: |
-          echo "Checking Codespace $CODESPACE_NAME state..."
-          TIMEOUT_SECONDS=600
-          POLL_INTERVAL=30
-          ELAPSED=0
-          while [ $ELAPSED -lt $TIMEOUT_SECONDS ]; do
-            CODESPACE_DETAILS=$(gh api /user/codespaces/$CODESPACE_NAME --jq '{state: .state, name: .name}' 2>&1)
-            CODESPACE_STATUS=$?
-            if [ $CODESPACE_STATUS -ne 0 ]; then
-              echo "Error fetching Codespace details: $CODESPACE_DETAILS"
-              exit 1
+          MAX_ATTEMPTS=3
+          ATTEMPT=1
+          until [ $ATTEMPT -gt $MAX_ATTEMPTS ]; do
+            echo "Attempt $ATTEMPT of $MAX_ATTEMPTS to restart Codespace $CODESPACE_NAME..."
+            
+            # Step 1: Ensure Codespace is Stopped
+            echo "Checking Codespace $CODESPACE_NAME state..."
+            TIMEOUT_SECONDS=600
+            POLL_INTERVAL=30
+            ELAPSED=0
+            while [ $ELAPSED -lt $TIMEOUT_SECONDS ]; do
+              CODESPACE_DETAILS=$(gh api /user/codespaces/$CODESPACE_NAME --jq '{state: .state, name: .name}' 2>&1)
+              CODESPACE_STATUS=$?
+              if [ $CODESPACE_STATUS -ne 0 ]; then
+                echo "Error fetching Codespace details: $CODESPACE_DETAILS"
+                exit 1
+              fi
+              CODESPACE_STATE=$(echo "$CODESPACE_DETAILS" | jq -r '.state')
+              echo "Codespace $CODESPACE_NAME is in state: $CODESPACE_STATE"
+              if [ "$CODESPACE_STATE" = "Stopped" ] || [ "$CODESPACE_STATE" = "Shutdown" ]; then
+                echo "Codespace is ready to restart."
+                break
+              fi
+              if [ "$CODESPACE_STATE" = "Available" ]; then
+                echo "Codespace is already Available. No restart needed."
+                exit 0
+              fi
+              echo "Attempting to stop Codespace $CODESPACE_NAME..."
+              STOP_OUTPUT=$(gh api -X POST \
+                -H "Accept: application/vnd.github.v3+json" \
+                /user/codespaces/$CODESPACE_NAME/stop 2>&1)
+              STOP_STATUS=$?
+              if [ $STOP_STATUS -ne 0 ]; then
+                echo "Failed to stop Codespace: $STOP_OUTPUT"
+              fi
+              echo "Waiting $POLL_INTERVAL seconds before checking again..."
+              sleep $POLL_INTERVAL
+              ELAPSED=$((ELAPSED + POLL_INTERVAL))
+            done
+            if [ $ELAPSED -ge $TIMEOUT_SECONDS ]; then
+              echo "Error: Timeout after $TIMEOUT_SECONDS seconds. Codespace is still in state: $CODESPACE_STATE"
+              ATTEMPT=$((ATTEMPT + 1))
+              if [ $ATTEMPT -le $MAX_ATTEMPTS ]; then
+                echo "Retrying entire process in 60 seconds..."
+                sleep 60
+              fi
+              continue
             fi
+
+            # Step 2: Restart Codespace
+            RETRY_COUNT=0
+            MAX_RETRIES=5
+            until [ $RETRY_COUNT -ge $MAX_RETRIES ]; do
+              START_OUTPUT=$(gh api -X POST \
+                -H "Accept: application/vnd.github.v3+json" \
+                /user/codespaces/$CODESPACE_NAME/start 2>&1)
+              START_STATUS=$?
+              if [ $START_STATUS -eq 0 ]; then
+                echo "Codespace $CODESPACE_NAME restart initiated successfully."
+                break
+              fi
+              echo "Failed to restart Codespace $CODESPACE_NAME (Attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)."
+              echo "Error details: $START_OUTPUT"
+              if echo "$START_OUTPUT" | grep -q "HTTP 409" || echo "$START_OUTPUT" | grep -q "HTTP 5"; then
+                echo "Retryable error detected. Retrying in 60 seconds..."
+                sleep 60
+              else
+                echo "Non-retryable error: $START_OUTPUT"
+                ATTEMPT=$((ATTEMPT + 1))
+                if [ $ATTEMPT -le $MAX_ATTEMPTS ]; then
+                  echo "Retrying entire process in 60 seconds..."
+                  sleep 60
+                fi
+                break
+              fi
+              RETRY_COUNT=$((RETRY_COUNT + 1))
+            done
+            if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
+              echo "Failed to restart Codespace $CODESPACE_NAME after $MAX_RETRIES attempts."
+              ATTEMPT=$((ATTEMPT + 1))
+              if [ $ATTEMPT -le $MAX_ATTEMPTS ]; then
+                echo "Retrying entire process in 60 seconds..."
+                sleep 60
+              fi
+              continue
+            fi
+
+            # Step 3: Verify Codespace State
+            echo "Waiting 120 seconds for Codespace to stabilize..."
+            sleep 120
+            echo "Fetching Codespace details..."
+            CODESPACE_DETAILS=$(gh api /user/codespaces/$CODESPACE_NAME --jq '{state: .state, web_url: .web_url}')
             CODESPACE_STATE=$(echo "$CODESPACE_DETAILS" | jq -r '.state')
-            echo "Codespace $CODESPACE_NAME is in state: $CODESPACE_STATE"
-            if [ "$CODESPACE_STATE" = "Stopped" ] || [ "$CODESPACE_STATE" = "Shutdown" ]; then
-              echo "Codespace is ready to restart."
-              break
-            fi
+            CODESPACE_WEB_URL=$(echo "$CODESPACE_DETAILS" | jq -r '.web_url')
+            echo "Codespace state: $CODESPACE_STATE"
             if [ "$CODESPACE_STATE" = "Available" ]; then
-              echo "Codespace is already Available. No restart needed."
+              echo "Codespace $CODESPACE_NAME is ready."
+              echo "Open the Codespace in VS Code at: $CODESPACE_WEB_URL"
+              echo "Then, check the Ports tab for the public URL of port 6200 (labeled 'VNC') to access the desktop GUI."
+              echo "Verify the container setup by checking for mohamed.txt on the desktop in the VNC GUI."
               exit 0
-            fi
-            echo "Waiting $POLL_INTERVAL seconds before checking again..."
-            sleep $POLL_INTERVAL
-            ELAPSED=$((ELAPSED + POLL_INTERVAL))
-          done
-          if [ $ELAPSED -ge $TIMEOUT_SECONDS ]; then
-            echo "Error: Timeout after $TIMEOUT_SECONDS seconds. Codespace is still in state: $CODESPACE_STATE"
-            exit 1
-          fi
-      - name: Restart Codespace
-        env:
-          CODESPACE_NAME: ${{ github.event.client_payload.codespace_name }}
-        run: |
-          RETRY_COUNT=0
-          MAX_RETRIES=5
-          until [ $RETRY_COUNT -ge $MAX_RETRIES ]; do
-            START_OUTPUT=$(gh api -X POST \
-              -H "Accept: application/vnd.github.v3+json" \
-              /user/codespaces/$CODESPACE_NAME/start 2>&1)
-            START_STATUS=$?
-            if [ $START_STATUS -eq 0 ]; then
-              echo "Codespace $CODESPACE_NAME restart initiated successfully."
-              exit 0
-            fi
-            echo "Failed to restart Codespace $CODESPACE_NAME (Attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)."
-            echo "Error details: $START_OUTPUT"
-            if echo "$START_OUTPUT" | grep -q "HTTP 409"; then
-              echo "Conflict detected (HTTP 409). Retrying in 60 seconds..."
-              sleep 60
-            elif echo "$START_OUTPUT" | grep -q "HTTP 5"; then
-              echo "Server error detected (HTTP 5xx). Retrying in 60 seconds..."
-              sleep 60
             else
-              echo "Non-retryable error: $START_OUTPUT"
-              exit 1
+              echo "Error: Codespace $CODESPACE_NAME is not in Available state (Current state: $CODESPACE_STATE)."
+              ATTEMPT=$((ATTEMPT + 1))
+              if [ $ATTEMPT -le $MAX_ATTEMPTS ]; then
+                echo "Retrying entire process in 60 seconds..."
+                sleep 60
+              fi
+              continue
             fi
-            RETRY_COUNT=$((RETRY_COUNT + 1))
           done
-          echo "Failed to restart Codespace $CODESPACE_NAME after $MAX_RETRIES attempts."
+          echo "Error: Failed to restart Codespace $CODESPACE_NAME after $MAX_ATTEMPTS attempts."
+          echo "Triggering retry-restart-codespace workflow..."
+          gh api -X POST \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{ secrets.CODESPACE_PAT }}" \
+            /repos/${{ github.repository }}/dispatches \
+            -f event_type=retry-restart-codespace \
+            -f client_payload="{\"codespace_name\": \"$CODESPACE_NAME\"}"
           exit 1
-      - name: Verify Codespace State
-        env:
-          CODESPACE_NAME: ${{ github.event.client_payload.codespace_name }}
-        run: |
-          echo "Waiting 120 seconds for Codespace to stabilize..."
-          sleep 120
-          echo "Fetching Codespace details..."
-          CODESPACE_DETAILS=$(gh api /user/codespaces/$CODESPACE_NAME --jq '{state: .state, web_url: .web_url}')
-          CODESPACE_STATE=$(echo "$CODESPACE_DETAILS" | jq -r '.state')
-          CODESPACE_WEB_URL=$(echo "$CODESPACE_DETAILS" | jq -r '.web_url')
-          echo "Codespace state: $CODESPACE_STATE"
-          if [ "$CODESPACE_STATE" != "Available" ]; then
-            echo "Error: Codespace $CODESPACE_NAME is not in Available state."
-            exit 1
-          fi
-          echo "Codespace $CODESPACE_NAME is ready."
-          echo "Open the Codespace in VS Code at: $CODESPACE_WEB_URL"
-          echo "Then, check the Ports tab for the public URL of port 6200 (labeled 'VNC') to access the desktop GUI."
-          echo "Verify the container setup by checking for mohamed.txt on the desktop in the VNC GUI."
