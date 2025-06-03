@@ -1,8 +1,8 @@
 name: Keep Codespace Active
 on:
-  schedule:
-    - cron: '*/5 * * * *' # Runs every 5 minutes for testing
-  workflow_dispatch: # Allows manual trigger
+  repository_dispatch:
+    types: [keep-codespace-active]
+  workflow_dispatch: # Retain manual trigger
 jobs:
   check-and-activate:
     runs-on: ubuntu-latest
