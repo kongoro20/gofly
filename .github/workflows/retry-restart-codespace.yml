@@ -51,7 +51,7 @@ jobs:
             echo "{\"event_type\": \"restart-codespace\", \"client_payload\": {\"codespace_name\": \"$CODESPACE_NAME\"}}" > dispatch_payload.json
 
             # Retry dispatching the event
-            DISPATCH_RETRIES=3
+            DISPATCH_RETRIES=15
             DISPATCH_ATTEMPT=1
             until [ $DISPATCH_ATTEMPT -gt $DISPATCH_RETRIES ]; do
               echo "Dispatch attempt $DISPATCH_ATTEMPT of $DISPATCH_RETRIES at $(date -u '+%Y-%m-%d %H:%M:%S UTC')..."
