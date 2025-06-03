@@ -132,11 +132,29 @@ jobs:
             fi
           done
           echo "Error: Failed to restart Codespace $CODESPACE_NAME after $MAX_ATTEMPTS attempts."
-          echo "Triggering retry-restart-codespace workflow..."
-          gh api -X POST \
-            -H "Accept: application/vnd.github.v3+json" \
-            -H "Authorization: token ${{ secrets.CODESPACE_PAT }}" \
-            /repos/${{ github.repository }}/dispatches \
-            -f event_type=retry-restart-codespace \
-            -f client_payload="{\"codespace_name\": \"$CODESPACE_NAME\"}"
+          echo "Attempting to trigger retry-restart-codespace workflow..."
+          DISPATCH_RETRIES=1
+          DISPATCH_ATTEMPT=1
+          until [ $DISPATCH_ATTEMPT -gt $DISPATCH_RETRIES ]; do
+            echo "Dispatch attempt $DISPATCH_ATTEMPT of $DISPATCH_RETRIES..."
+            DISPATCH_OUTPUT=$(gh api -X POST \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "Authorization: token ${{ secrets.CODESPACE_PAT }}" \
+              /repos/${{ github.repository }}/dispatches \
+              --raw-field event_type=retry-restart-codespace \
+              --raw-field client_payload="{\"codespace_name\": \"$CODESPACE_NAME\"}" 2>&1)
+            DISPATCH_STATUS=$?
+            if [ $DISPATCH_STATUS -eq 0 ]; then
+              echo "Successfully triggered retry-restart-codespace workflow."
+              exit 1
+            fi
+            echo "Failed to trigger retry-restart-codespace workflow (Attempt $DISPATCH_ATTEMPT/$DISPATCH_RETRIES)."
+            echo "Error details: $DISPATCH_OUTPUT"
+            if [ $DISPATCH_ATTEMPT -lt $DISPATCH_RETRIES ]; then
+              echo "Retrying dispatch in 60 seconds..."
+              sleep 60
+            fi
+            DISPATCH_ATTEMPT=$((DISPATCH_ATTEMPT + 1))
+          done
+          echo "Error: Failed to trigger retry-restart-codespace workflow after $DISPATCH_RETRIES attempts."
           exit 1
