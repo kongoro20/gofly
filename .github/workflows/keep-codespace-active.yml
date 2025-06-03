@@ -1,8 +1,8 @@
 name: Keep Codespace Active
 on:
+  workflow_dispatch: # Manual trigger to start
   repository_dispatch:
-    types: [keep-codespace-active]
-  workflow_dispatch: # Retain manual trigger
+    types: [keep-codespace-active] # Self-trigger
 jobs:
   check-and-activate:
     runs-on: ubuntu-latest
@@ -39,12 +39,12 @@ jobs:
           else
             echo "No relevant workflows running. Proceeding with Codespace state check."
           fi
-      - name: Check Codespace State
+      - name: Check Codespace State and Running Time
         env:
           CODESPACE_NAME: studious-spork-975v75jqj7vp397x
         run: |
           echo "Checking Codespace $CODESPACE_NAME state at $(date -u '+%Y-%m-%d %H:%M:%S UTC')..."
-          CODESPACE_DETAILS=$(gh api /user/codespaces/$CODESPACE_NAME --jq '{state: .state, web_url: .web_url}' 2>&1)
+          CODESPACE_DETAILS=$(gh api /user/codespaces/$CODESPACE_NAME --jq '{state: .state, web_url: .web_url, last_used_at: .last_used_at}' 2>&1)
           CODESPACE_STATUS=$?
           if [ $CODESPACE_STATUS -ne 0 ]; then
             echo "Error fetching Codespace details: $CODESPACE_DETAILS"
@@ -52,71 +52,87 @@ jobs:
           fi
           CODESPACE_STATE=$(echo "$CODESPACE_DETAILS" | jq -r '.state')
           CODESPACE_WEB_URL=$(echo "$CODESPACE_DETAILS" | jq -r '.web_url')
+          LAST_USED_AT=$(echo "$CODESPACE_DETAILS" | jq -r '.last_used_at')
           echo "Codespace state: $CODESPACE_STATE"
-          
-          if [ "$CODESPACE_STATE" != "Available" ]; then
-            echo "Codespace is not Available (state: $CODESPACE_STATE). Preparing to trigger restart..."
-            TRIGGER_RESTART="true"
-          else
-            echo "Codespace is Available. Stopping it before restarting..."
-            STOP_RETRIES=3
-            STOP_ATTEMPT=1
-            until [ $STOP_ATTEMPT -gt $STOP_RETRIES ]; do
-              echo "Stop attempt $STOP_ATTEMPT of $STOP_RETRIES..."
-              STOP_OUTPUT=$(gh api -X POST \
-                -H "Accept: application/vnd.github.v3+json" \
-                /user/codespaces/$CODESPACE_NAME/stop 2>&1)
-              STOP_STATUS=$?
-              if [ $STOP_STATUS -eq 0 ]; then
-                echo "Successfully initiated stop for Codespace $CODESPACE_NAME."
-                break
-              fi
-              echo "Failed to stop Codespace (Attempt $STOP_ATTEMPT/$STOP_RETRIES)."
-              echo "Error details: $STOP_OUTPUT"
-              if [ $STOP_ATTEMPT -lt $STOP_RETRIES ]; then
-                echo "Retrying stop in 30 seconds..."
-                sleep 30
-              fi
-              STOP_ATTEMPT=$((STOP_ATTEMPT + 1))
-            done
+          echo "Last used at: $LAST_USED_AT"
 
-            if [ $STOP_STATUS -ne 0 ]; then
-              echo "Error: Failed to stop Codespace after $STOP_RETRIES attempts."
-              exit 1
-            fi
-            echo "Verifying Codespace is stopped..."
-            TIMEOUT_SECONDS=300
-            POLL_INTERVAL=30
-            ELAPSED=0
-            while [ $ELAPSED -lt $TIMEOUT_SECONDS ]; do
-              CODESPACE_DETAILS=$(gh api /user/codespaces/$CODESPACE_NAME --jq '{state: .state}' 2>&1)
-              CODESPACE_STATUS=$?
-              if [ $CODESPACE_STATUS -ne 0 ]; then
-                echo "Error fetching Codespace details: $CODESPACE_DETAILS"
+          # Calculate running time if state is Available
+          if [ "$CODESPACE_STATE" = "Available" ]; then
+            CURRENT_TIME=$(date -u +%s)
+            LAST_USED_EPOCH=$(date -d "$LAST_USED_AT" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$LAST_USED_AT" +%s)
+            RUNNING_SECONDS=$((CURRENT_TIME - LAST_USED_EPOCH))
+            RUNNING_MINUTES=$((RUNNING_SECONDS / 60))
+            echo "Codespace running for $RUNNING_MINUTES minutes"
+            
+            if [ $RUNNING_MINUTES -ge 45 ]; then
+              echo "Codespace running ≥45 minutes. Stopping it before restarting..."
+              TRIGGER_RESTART="true"
+              # Stop the Codespace
+              STOP_RETRIES=3
+              STOP_ATTEMPT=1
+              until [ $STOP_ATTEMPT -gt $STOP_RETRIES ]; do
+                echo "Stop attempt $STOP_ATTEMPT of $STOP_RETRIES..."
+                STOP_OUTPUT=$(gh api -X POST \
+                  -H "Accept: application/vnd.github.v3+json" \
+                  /user/codespaces/$CODESPACE_NAME/stop 2>&1)
+                STOP_STATUS=$?
+                if [ $STOP_STATUS -eq 0 ]; then
+                  echo "Successfully initiated stop for Codespace $CODESPACE_NAME."
+                  break
+                fi
+                echo "Failed to stop Codespace (Attempt $STOP_ATTEMPT/$STOP_RETRIES)."
+                echo "Error details: $STOP_OUTPUT"
+                if [ $STOP_ATTEMPT -lt $STOP_RETRIES ]; then
+                  echo "Retrying stop in 30 seconds..."
+                  sleep 30
+                fi
+                STOP_ATTEMPT=$((STOP_ATTEMPT + 1))
+              done
+
+              if [ $STOP_STATUS -ne 0 ]; then
+                echo "Error: Failed to stop Codespace after $STOP_RETRIES attempts."
                 exit 1
               fi
-              CODESPACE_STATE=$(echo "$CODESPACE_DETAILS" | jq -r '.state')
-              echo "Codespace state: $CODESPACE_STATE"
-              if [ "$CODESPACE_STATE" = "Stopped" ] || [ "$CODESPACE_STATE" = "Shutdown" ]; then
-                echo "Codespace successfully stopped. Preparing to trigger restart..."
-                TRIGGER_RESTART="true"
-                break
+
+              echo "Verifying Codespace is stopped..."
+              TIMEOUT_SECONDS=300
+              POLL_INTERVAL=30
+              ELAPSED=0
+              while [ $ELAPSED -lt $TIMEOUT_SECONDS ]; do
+                CODESPACE_DETAILS=$(gh api /user/codespaces/$CODESPACE_NAME --jq '{state: .state}' 2>&1)
+                CODESPACE_STATUS=$?
+                if [ $CODESPACE_STATUS -ne 0 ]; then
+                  echo "Error fetching Codespace details: $CODESPACE_DETAILS"
+                  exit 1
+                fi
+                CODESPACE_STATE=$(echo "$CODESPACE_DETAILS" | jq -r '.state')
+                echo "Codespace state: $CODESPACE_STATE"
+                if [ "$CODESPACE_STATE" = "Stopped" ] || [ "$CODESPACE_STATE" = "Shutdown" ]; then
+                  echo "Codespace successfully stopped. Preparing to trigger restart..."
+                  break
+                fi
+                echo "Waiting $POLL_INTERVAL seconds for Codespace to stop..."
+                sleep $POLL_INTERVAL
+                ELAPSED=$((ELAPSED + POLL_INTERVAL))
+              done
+              if [ $ELAPSED -ge $TIMEOUT_SECONDS ]; then
+                echo "Error: Timeout after $TIMEOUT_SECONDS seconds. Codespace state: $CODESPACE_STATE"
+                exit 1
               fi
-              echo "Waiting $POLL_INTERVAL seconds for Codespace to stop..."
-              sleep $POLL_INTERVAL
-              ELAPSED=$((ELAPSED + POLL_INTERVAL))
-            done
-            if [ $ELAPSED -ge $TIMEOUT_SECONDS ]; then
-              echo "Error: Timeout after $TIMEOUT_SECONDS seconds. Codespace state: $CODESPACE_STATE"
-              exit 1
+            else
+              echo "Codespace running for <$RUNNING_MINUTES minutes (<45). No action needed."
+              TRIGGER_RESTART="false"
             fi
+          else
+            echo "Codespace is not Available (state: $CODESPACE_STATE). Preparing to trigger restart..."
+            TRIGGER_RESTART="true"
           fi
 
           if [ "$TRIGGER_RESTART" = "true" ]; then
             echo "Writing dispatch payload to trigger restart-codespace workflow..."
             echo "{\"event_type\": \"restart-codespace\", \"client_payload\": {\"codespace_name\": \"$CODESPACE_NAME\"}}" > dispatch_payload.json
 
-            DISPATCH_RETRIES=3
+            DISPATCH_RETRIES=10
             DISPATCH_ATTEMPT=1
             until [ $DISPATCH_ATTEMPT -gt $DISPATCH_RETRIES ]; do
               echo "Dispatch attempt $DISPATCH_ATTEMPT of $DISPATCH_RETRIES at $(date -u '+%Y-%m-%d %H:%M:%S UTC')..."
@@ -128,7 +144,7 @@ jobs:
               DISPATCH_STATUS=$?
               if [ $DISPATCH_STATUS -eq 0 ]; then
                 echo "Successfully triggered restart-codespace workflow."
-                exit 0
+                break
               fi
               echo "Failed to trigger restart-codespace workflow (Attempt $DISPATCH_ATTEMPT/$DISPATCH_RETRIES)."
               echo "Error details: $DISPATCH_OUTPUT"
@@ -138,6 +154,11 @@ jobs:
               fi
               DISPATCH_ATTEMPT=$((DISPATCH_ATTEMPT + 1))
             done
+
+            if [ $DISPATCH_STATUS -ne 0 ]; then
+              echo "Error: Failed to trigger restart-codespace workflow after $DISPATCH_RETRIES attempts."
+              exit 1
+            fi
 
             echo "Final check of Codespace $CODESPACE_NAME state..."
             CODESPACE_DETAILS=$(gh api /user/codespaces/$CODESPACE_NAME --jq '{state: .state, web_url: .web_url}' 2>&1)
@@ -151,9 +172,46 @@ jobs:
             echo "Codespace state: $CODESPACE_STATE"
             if [ "$CODESPACE_STATE" = "Available" ]; then
               echo "Codespace is now Available. Access at: $CODESPACE_WEB_URL"
-              exit 0
             else
-              echo "Error: Failed to trigger restart-codespace workflow after $DISPATCH_RETRIES attempts. Codespace state: $CODESPACE_STATE"
-              exit 1
+              echo "Codespace state after restart trigger: $CODESPACE_STATE"
             fi
           fi
+      - name: Schedule Next Run
+        run: |
+          echo "Scheduling next run at $(date -u '+%Y-%m-%d %H:%M:%S UTC')..."
+          # Sleep for 40 minutes (2400 seconds)
+          sleep 100
+          
+          # Check API rate limit before dispatching
+          RATE_LIMIT=$(gh api /rate_limit --jq '.resources.core.remaining')
+          echo "API rate limit remaining: $RATE_LIMIT"
+          if [ "$RATE_LIMIT" -lt 10 ]; then
+            echo "Rate limit too low. Waiting 300 seconds..."
+            sleep 300
+          fi
+          
+          # Dispatch self-trigger
+          echo '{"event_type": "keep-codespace-active"}' > self_dispatch.json
+          RETRIES=10
+          ATTEMPT=1
+          until [ $ATTEMPT -gt $RETRIES ]; do
+            echo "Self-dispatch attempt $ATTEMPT of $RETRIES..."
+            DISPATCH_OUTPUT=$(gh api -X POST \
+              -H "Accept: application/vnd.github.v3+json" \
+              /repos/${{ github.repository }}/dispatches \
+              --input self_dispatch.json 2>&1)
+            DISPATCH_STATUS=$?
+            if [ $DISPATCH_STATUS -eq 0 ]; then
+              echo "Successfully dispatched next keep-codespace-active run."
+              exit 0
+            fi
+            echo "Failed to dispatch (Attempt $ATTEMPT/$RETRIES). Error: $DISPATCH_OUTPUT"
+            if [ $ATTEMPT -lt $RETRIES ]; then
+              echo "Retrying in 60 seconds..."
+              sleep 60
+            fi
+            ATTEMPT=$((ATTEMPT + 1))
+          done
+          
+          echo "Error: Failed to dispatch next run after $RETRIES attempts."
+          exit 1
