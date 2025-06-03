@@ -16,11 +16,19 @@ jobs:
         run: |
           echo "${{ secrets.CODESPACE_PAT }}" | gh auth login --with-token
           gh auth status
+      - name: Check API Rate Limit
+        run: |
+          RATE_LIMIT=$(gh api /rate_limit --jq '.resources.core.remaining')
+          echo "API rate limit remaining: $RATE_LIMIT"
+          if [ "$RATE_LIMIT" -lt 10 ]; then
+            echo "Rate limit too low. Waiting 300 seconds before proceeding..."
+            sleep 300
+          fi
       - name: Check Codespace State and Retry
         env:
           CODESPACE_NAME: ${{ github.event.client_payload.codespace_name }}
         run: |
-          echo "Checking Codespace $CODESPACE_NAME state..."
+          echo "Checking Codespace $CODESPACE_NAME state at $(date -u '+%Y-%m-%d %H:%M:%S UTC')..."
           CODESPACE_DETAILS=$(gh api /user/codespaces/$CODESPACE_NAME --jq '{state: .state, web_url: .web_url}' 2>&1)
           CODESPACE_STATUS=$?
           if [ $CODESPACE_STATUS -ne 0 ]; then
@@ -38,13 +46,51 @@ jobs:
             exit 0
           else
             echo "Codespace $CODESPACE_NAME is not Available (state: $CODESPACE_STATE). Triggering restart..."
-            sleep 60  # Delay to avoid rate limits
-            gh api -X POST \
-              -H "Accept: application/vnd.github.v3+json" \
-              -H "Authorization: token ${{ secrets.CODESPACE_PAT }}" \
-              /repos/${{ github.repository }}/dispatches \
-              -f event_type=restart-codespace \
-              -f client_payload="{\"codespace_name\": \"$CODESPACE_NAME\"}"
-            echo "Triggered restart-codespace workflow. Check the Actions tab for progress."
-            exit 0  # Exit successfully to allow the triggered workflow to run
+
+            # Write client_payload to a temporary JSON file to ensure correct formatting
+            echo "{\"event_type\": \"restart-codespace\", \"client_payload\": {\"codespace_name\": \"$CODESPACE_NAME\"}}" > dispatch_payload.json
+
+            # Retry dispatching the event
+            DISPATCH_RETRIES=3
+            DISPATCH_ATTEMPT=1
+            until [ $DISPATCH_ATTEMPT -gt $DISPATCH_RETRIES ]; do
+              echo "Dispatch attempt $DISPATCH_ATTEMPT of $DISPATCH_RETRIES at $(date -u '+%Y-%m-%d %H:%M:%S UTC')..."
+              DISPATCH_OUTPUT=$(gh api -X POST \
+                -H "Accept: application/vnd.github.v3+json" \
+                -H "Authorization: token ${{ secrets.CODESPACE_PAT }}" \
+                /repos/${{ github.repository }}/dispatches \
+                --input dispatch_payload.json 2>&1)
+              DISPATCH_STATUS=$?
+              if [ $DISPATCH_STATUS -eq 0 ]; then
+                echo "Successfully triggered restart-codespace workflow."
+                exit 0
+              fi
+              echo "Failed to trigger restart-codespace workflow (Attempt $DISPATCH_ATTEMPT/$DISPATCH_RETRIES)."
+              echo "Error details: $DISPATCH_OUTPUT"
+              if [ $DISPATCH_ATTEMPT -lt $DISPATCH_RETRIES ]; then
+                echo "Retrying dispatch in 60 seconds..."
+                sleep 60
+              fi
+              DISPATCH_ATTEMPT=$((DISPATCH_ATTEMPT + 1))
+            done
+
+            # Final state check to avoid unnecessary exit if Codespace is now Available
+            echo "Final check of Codespace $CODESPACE_NAME state..."
+            CODESPACE_DETAILS=$(gh api /user/codespaces/$CODESPACE_NAME --jq '{state: .state, web_url: .web_url}' 2>&1)
+            CODESPACE_STATUS=$?
+            if [ $CODESPACE_STATUS -ne 0 ]; then
+              echo "Error fetching final Codespace details: $CODESPACE_DETAILS"
+              exit 1
+            fi
+            CODESPACE_STATE=$(echo "$CODESPACE_DETAILS" | jq -r '.state')
+            CODESPACE_WEB_URL=$(echo "$CODESPACE_DETAILS" | jq -r '.web_url')
+            echo "Codespace state: $CODESPACE_STATE"
+            if [ "$CODESPACE_STATE" = "Available" ]; then
+              echo "Codespace $CODESPACE_NAME is now Available. No further action needed."
+              echo "Access it at: $CODESPACE_WEB_URL"
+              exit 0
+            else
+              echo "Error: Failed to trigger restart-codespace workflow after $DISPATCH_RETRIES attempts and Codespace is still not Available (state: $CODESPACE_STATE)."
+              exit 1
+            fi
           fi
