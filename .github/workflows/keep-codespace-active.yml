@@ -1,4 +1,3 @@
-```yaml
 name: Keep Codespace Active
 on:
   workflow_dispatch: # Manual trigger to start
