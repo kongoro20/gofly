@@ -1,5 +1,25 @@
+```yaml
 name: Keep Codespace Active
-
+on:
+  workflow_dispatch: # Manual trigger to start
+  repository_dispatch:
+    types: [keep-codespace-active] # Self-trigger
+jobs:
+  check-and-activate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log Workflow Trigger Time
+        run: |
+          echo "Workflow triggered at $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+      - name: Install GitHub CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gh jq
+          echo "GitHub CLI version:"
+          gh --version
+      - name: Authenticate GitHub CLI
+        run: |
+          echo "${{ secrets.CODESPACE_PAT }}" | gh auth login --with-token
           gh auth status
       - name: Check API Rate Limit
         run: |
@@ -41,7 +61,7 @@ name: Keep Codespace Active
             RUNNING_MINUTES=$((RUNNING_SECONDS / 60))
             echo "Codespace running for $RUNNING_MINUTES minutes"
             
-            if [ $RUNNING_MINUTES -le 3 ]; then
+            if [ $RUNNING_MINUTES -le 45 ]; then
               echo "Codespace running for ≤45 minutes. Skipping to sleep."
               echo "SKIP_TO_SLEEP=true" >> $GITHUB_ENV
             else
@@ -154,7 +174,7 @@ name: Keep Codespace Active
           if [ "${{ env.SKIP_TO_SLEEP }}" = "true" ]; then
             echo "Skipping directly to sleep due to Codespace state or running workflows."
           fi
-          sleep 80
+          sleep 1800
           
           # Check API rate limit before dispatching
           RATE_LIMIT=$(gh api /rate_limit --jq '.resources.core.remaining')
