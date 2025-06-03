@@ -1,11 +1,15 @@
 name: Keep Codespace Active
 on:
   schedule:
-    - cron: '*/4 * * * *' # Runs every 40 minutes
+    - cron: '*/5 * * * *' # Runs every 5 minutes for testing
+  workflow_dispatch: # Allows manual trigger
 jobs:
   check-and-activate:
     runs-on: ubuntu-latest
     steps:
+      - name: Log Workflow Trigger Time
+        run: |
+          echo "Workflow triggered at $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
       - name: Install GitHub CLI
         run: |
           sudo apt-get update
@@ -21,7 +25,7 @@ jobs:
           RATE_LIMIT=$(gh api /rate_limit --jq '.resources.core.remaining')
           echo "API rate limit remaining: $RATE_LIMIT"
           if [ "$RATE_LIMIT" -lt 10 ]; then
-            echo "Rate limit too low. Waiting 300 seconds before proceeding..."
+            echo "Rate limit too low. Waiting 300 seconds..."
             sleep 300
           fi
       - name: Check for Running Workflows
@@ -30,14 +34,14 @@ jobs:
           RUNNING_WORKFLOWS=$(gh api /repos/${{ github.repository }}/actions/runs \
             --jq '[.workflow_runs[] | select(.name == "Restart Codespace" or .name == "Retry Restart Codespace") | select(.status != "completed")] | length')
           if [ "$RUNNING_WORKFLOWS" -gt 0 ]; then
-            echo "Found $RUNNING_WORKFLOWS running instances of 'Restart Codespace' or 'Retry Restart Codespace'. Skipping trigger to avoid conflicts."
+            echo "Found $RUNNING_WORKFLOWS running instances of 'Restart Codespace' or 'Retry Restart Codespace'. Skipping trigger."
             exit 0
           else
-            echo "No relevant workflows are running. Proceeding with Codespace state check."
+            echo "No relevant workflows running. Proceeding with Codespace state check."
           fi
       - name: Check Codespace State
         env:
-          CODESPACE_NAME: studious-spork-975v75jqj7vp397x # Replace with your actual Codespace name
+          CODESPACE_NAME: studious-spork-975v75jqj7vp397x
         run: |
           echo "Checking Codespace $CODESPACE_NAME state at $(date -u '+%Y-%m-%d %H:%M:%S UTC')..."
           CODESPACE_DETAILS=$(gh api /user/codespaces/$CODESPACE_NAME --jq '{state: .state, web_url: .web_url}' 2>&1)
@@ -50,14 +54,11 @@ jobs:
           CODESPACE_WEB_URL=$(echo "$CODESPACE_DETAILS" | jq -r '.web_url')
           echo "Codespace state: $CODESPACE_STATE"
           
-          # Case 1: Codespace is not Available (e.g., Stopped, Shutdown)
           if [ "$CODESPACE_STATE" != "Available" ]; then
-            echo "Codespace $CODESPACE_NAME is not Available (state: $CODESPACE_STATE). Preparing to trigger restart..."
+            echo "Codespace is not Available (state: $CODESPACE_STATE). Preparing to trigger restart..."
             TRIGGER_RESTART="true"
-          
-          # Case 2: Codespace is Available, stop it first
           else
-            echo "Codespace $CODESPACE_NAME is Available. Stopping it before restarting..."
+            echo "Codespace is Available. Stopping it before restarting..."
             STOP_RETRIES=3
             STOP_ATTEMPT=1
             until [ $STOP_ATTEMPT -gt $STOP_RETRIES ]; do
@@ -70,7 +71,7 @@ jobs:
                 echo "Successfully initiated stop for Codespace $CODESPACE_NAME."
                 break
               fi
-              echo "Failed to stop Codespace $CODESPACE_NAME (Attempt $STOP_ATTEMPT/$STOP_RETRIES)."
+              echo "Failed to stop Codespace (Attempt $STOP_ATTEMPT/$STOP_RETRIES)."
               echo "Error details: $STOP_OUTPUT"
               if [ $STOP_ATTEMPT -lt $STOP_RETRIES ]; then
                 echo "Retrying stop in 30 seconds..."
@@ -79,12 +80,11 @@ jobs:
               STOP_ATTEMPT=$((STOP_ATTEMPT + 1))
             done
 
-            # Verify Codespace is stopped
             if [ $STOP_STATUS -ne 0 ]; then
-              echo "Error: Failed to stop Codespace $CODESPACE_NAME after $STOP_RETRIES attempts."
+              echo "Error: Failed to stop Codespace after $STOP_RETRIES attempts."
               exit 1
             fi
-            echo "Verifying Codespace $CODESPACE_NAME is stopped..."
+            echo "Verifying Codespace is stopped..."
             TIMEOUT_SECONDS=300
             POLL_INTERVAL=30
             ELAPSED=0
@@ -98,7 +98,7 @@ jobs:
               CODESPACE_STATE=$(echo "$CODESPACE_DETAILS" | jq -r '.state')
               echo "Codespace state: $CODESPACE_STATE"
               if [ "$CODESPACE_STATE" = "Stopped" ] || [ "$CODESPACE_STATE" = "Shutdown" ]; then
-                echo "Codespace $CODESPACE_NAME successfully stopped. Preparing to trigger restart..."
+                echo "Codespace successfully stopped. Preparing to trigger restart..."
                 TRIGGER_RESTART="true"
                 break
               fi
@@ -107,17 +107,15 @@ jobs:
               ELAPSED=$((ELAPSED + POLL_INTERVAL))
             done
             if [ $ELAPSED -ge $TIMEOUT_SECONDS ]; then
-              echo "Error: Timeout after $TIMEOUT_SECONDS seconds. Codespace is still in state: $CODESPACE_STATE"
+              echo "Error: Timeout after $TIMEOUT_SECONDS seconds. Codespace state: $CODESPACE_STATE"
               exit 1
             fi
           fi
 
-          # Trigger restart-codespace.yml if needed
           if [ "$TRIGGER_RESTART" = "true" ]; then
             echo "Writing dispatch payload to trigger restart-codespace workflow..."
             echo "{\"event_type\": \"restart-codespace\", \"client_payload\": {\"codespace_name\": \"$CODESPACE_NAME\"}}" > dispatch_payload.json
 
-            # Retry dispatching the event
             DISPATCH_RETRIES=3
             DISPATCH_ATTEMPT=1
             until [ $DISPATCH_ATTEMPT -gt $DISPATCH_RETRIES ]; do
@@ -141,7 +139,6 @@ jobs:
               DISPATCH_ATTEMPT=$((DISPATCH_ATTEMPT + 1))
             done
 
-            # Final state check to avoid unnecessary exit if Codespace is now Available
             echo "Final check of Codespace $CODESPACE_NAME state..."
             CODESPACE_DETAILS=$(gh api /user/codespaces/$CODESPACE_NAME --jq '{state: .state, web_url: .web_url}' 2>&1)
             CODESPACE_STATUS=$?
@@ -153,11 +150,10 @@ jobs:
             CODESPACE_WEB_URL=$(echo "$CODESPACE_DETAILS" | jq -r '.web_url')
             echo "Codespace state: $CODESPACE_STATE"
             if [ "$CODESPACE_STATE" = "Available" ]; then
-              echo "Codespace $CODESPACE_NAME is now Available. No further action needed."
-              echo "Access it at: $CODESPACE_WEB_URL"
+              echo "Codespace is now Available. Access at: $CODESPACE_WEB_URL"
               exit 0
             else
-              echo "Error: Failed to trigger restart-codespace workflow after $DISPATCH_RETRIES attempts and Codespace is still not Available (state: $CODESPACE_STATE)."
+              echo "Error: Failed to trigger restart-codespace workflow after $DISPATCH_RETRIES attempts. Codespace state: $CODESPACE_STATE"
               exit 1
             fi
           fi
