@@ -28,7 +28,7 @@ jobs:
         env:
           CODESPACE_NAME: ${{ github.event.client_payload.codespace_name }}
         run: |
-          MAX_ATTEMPTS=1
+          MAX_ATTEMPTS=15
           ATTEMPT=1
           until [ $ATTEMPT -gt $MAX_ATTEMPTS ]; do
             echo "Attempt $ATTEMPT of $MAX_ATTEMPTS to restart Codespace $CODESPACE_NAME at $(date -u '+%Y-%m-%d %H:%M:%S UTC')..."
