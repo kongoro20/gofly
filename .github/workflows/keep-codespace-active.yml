@@ -29,9 +29,16 @@ jobs:
             sleep 300
           fi
       - name: Check Codespace State and Running Time
-        env:
-          CODESPACE_NAME: studious-spork-975v75jqj7vp397x
         run: |
+          echo "Fetching existing Codespace name at $(date -u '+%Y-%m-%d %H:%M:%S UTC')..."
+          CODESPACE_NAME=$(gh api /user/codespaces --jq '.codespaces[0].name' 2>&1)
+          CODESPACE_STATUS=$?
+          if [ $CODESPACE_STATUS -ne 0 ] || [ -z "$CODESPACE_NAME" ] || [ "$CODESPACE_NAME" = "null" ]; then
+            echo "Error: No Codespace found or API error: $CODESPACE_NAME"
+            exit 1
+          fi
+          echo "Detected Codespace name: $CODESPACE_NAME"
+
           echo "Checking Codespace $CODESPACE_NAME state at $(date -u '+%Y-%m-%d %H:%M:%S UTC')..."
           CODESPACE_DETAILS=$(gh api /user/codespaces/$CODESPACE_NAME --jq '{state: .state, web_url: .web_url, last_used_at: .last_used_at}' 2>&1)
           CODESPACE_STATUS=$?
@@ -53,7 +60,7 @@ jobs:
             RUNNING_MINUTES=$((RUNNING_SECONDS / 60))
             echo "Codespace running for $RUNNING_MINUTES minutes"
             
-            if [ $RUNNING_MINUTES -le 5 ]; then
+            if [ $RUNNING_MINUTES -le 3 ]; then
               echo "Codespace running for ≤45 minutes. Skipping to sleep."
               echo "SKIP_TO_SLEEP=true" >> $GITHUB_ENV
             else
@@ -166,7 +173,7 @@ jobs:
           if [ "${{ env.SKIP_TO_SLEEP }}" = "true" ]; then
             echo "Skipping directly to sleep due to Codespace state or running workflows."
           fi
-          sleep 100
+          sleep 80
           
           # Check API rate limit before dispatching
           RATE_LIMIT=$(gh api /rate_limit --jq '.resources.core.remaining')
