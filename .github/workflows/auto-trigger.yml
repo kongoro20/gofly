@@ -20,9 +20,9 @@ jobs:
       - name: Run Dispatch Loop
         run: |
           # Max job duration ~6 hours (21,000 seconds)
-          MAX_DURATION=21000
+          MAX_DURATION=400
           # Interval between dispatches: 40 minutes (2400 seconds)
-          INTERVAL=180
+          INTERVAL=18000
           # Start time
           START_TIME=$(date +%s)
           
